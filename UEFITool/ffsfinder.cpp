@@ -12,6 +12,7 @@ WITHOUT WARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 */
 
 #include "ffsfinder.h"
+#include "../common/types.h"
 
 USTATUS FfsFinder::findHexPattern(const UModelIndex & index, const UByteArray & hexPattern, const UINT8 mode)
 {
@@ -56,6 +57,11 @@ USTATUS FfsFinder::findHexPattern(const UModelIndex & index, const UByteArray & 
             // For patterns that cross header|body boundary, skip patterns entirely located in body, since
             // children search above has already found them.
             if (!(hasChildren && mode == SEARCH_MODE_ALL && offset/2 >= model->header(index).size())) {
+                UModelIndex savedIndex = index;
+                if (model->type(savedIndex) == Types::Section)
+                    savedIndex = index.parent();
+                if (model->type(savedIndex) == Types::File)
+                    addFoundFile(savedIndex);
                 msg(UString("Hex pattern \"") + UString(hexPattern)
                     + UString("\" found as \"") + hexBody.mid(offset, hexPattern.length()).toUpper()
                     + UString("\" in ") + model->name(model->parent(index))
@@ -125,6 +131,11 @@ USTATUS FfsFinder::findGuidPattern(const UModelIndex & index, const UByteArray &
     INT32 offset = regexp.indexIn(hexBody);
     while (offset >= 0) {
         if (offset % 2 == 0) {
+            UModelIndex savedIndex = index;
+            if (model->type(savedIndex) == Types::Section)
+                savedIndex = index.parent();
+            if (model->type(savedIndex) == Types::File)
+                addFoundFile(savedIndex);
             msg(UString("GUID pattern \"") + UString(guidPattern)
                 + UString("\" found as \"") + hexBody.mid(offset, hexPattern.length()).toUpper()
                 + UString("\" in ") + model->name(model->parent(index))
@@ -173,7 +184,11 @@ USTATUS FfsFinder::findTextPattern(const UModelIndex & index, const UString & pa
 
     int offset = -1;
     while ((offset = data.indexOf(pattern, offset + 1, caseSensitive)) >= 0) {
-
+        UModelIndex savedIndex = index;
+        if (model->type(savedIndex) == Types::Section)
+            savedIndex = index.parent();
+        if (model->type(savedIndex) == Types::File)
+            addFoundFile(savedIndex);
         msg((unicode ? UString("Unicode") : UString("ASCII")) + UString(" text \"") + UString(pattern)
             + UString("\" in ") + model->name(model->parent(index))
             + UString("/") + model->name(index)

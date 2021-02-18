@@ -41,6 +41,8 @@ markingEnabled(true)
     connect(ui->actionOpenImageFileInNewWindow, SIGNAL(triggered()), this, SLOT(openImageFileInNewWindow()));
     connect(ui->actionSaveImageFile, SIGNAL(triggered()), this, SLOT(saveImageFile()));
     connect(ui->actionSearch, SIGNAL(triggered()), this, SLOT(search()));
+    connect(ui->actionExtractSearch, SIGNAL(triggered()), this, SLOT(extractSearchAsIs()));
+    connect(ui->actionExtractSearchBody, SIGNAL(triggered()), this, SLOT(extractSearchBody()));
     connect(ui->actionHexView, SIGNAL(triggered()), this, SLOT(hexView()));
     connect(ui->actionBodyHexView, SIGNAL(triggered()), this, SLOT(bodyHexView()));
     connect(ui->actionExtract, SIGNAL(triggered()), this, SLOT(extractAsIs()));
@@ -234,6 +236,8 @@ void UEFITool::populateUi(const QModelIndex &current)
     ui->actionExtract->setDisabled(model->hasEmptyHeader(current) && model->hasEmptyBody(current) && model->hasEmptyTail(current));
     ui->actionGoToData->setEnabled(type == Types::NvarEntry && subtype == Subtypes::LinkNvarEntry);
 
+
+
     // Disable rebuild for now
     //ui->actionRebuild->setDisabled(type == Types::Region && subtype == Subtypes::DescriptorRegion);
     //ui->actionReplace->setDisabled(type == Types::Region && subtype == Subtypes::DescriptorRegion);
@@ -265,6 +269,7 @@ void UEFITool::search()
     if (searchDialog->exec() != QDialog::Accepted)
         return;
 
+    ffsFinder->clearFoundFiles();
     QModelIndex rootIndex = model->index(0, 0);
 
     int index = searchDialog->ui->tabWidget->currentIndex();
@@ -315,6 +320,8 @@ void UEFITool::search()
             (Qt::CaseSensitivity) searchDialog->ui->textCaseSensitiveCheckBox->isChecked());
         showFinderMessages();
     }
+
+    ui->menuExtractSearchActions->setEnabled(ffsFinder->getFoundFiles().size() > 0);
 }
 
 void UEFITool::hexView()
@@ -797,6 +804,64 @@ void UEFITool::showParserMessages()
 
     ui->messagesTabWidget->setCurrentIndex(TAB_PARSER);
     ui->parserMessagesListWidget->scrollToBottom();
+}
+
+void UEFITool::extractSearchAsIs()
+{
+    extractSearch(EXTRACT_MODE_AS_IS);
+}
+
+void UEFITool::extractSearchBody()
+{
+    extractSearch(EXTRACT_MODE_BODY);
+}
+
+void UEFITool::extractSearch(const UINT8 mode)
+{
+    if (!ffsParser)
+        return;
+
+    std::vector<QModelIndex> foundFiles = ffsFinder->getFoundFiles();
+
+    if (foundFiles.size() == 0)
+        return;
+
+    QString dir = QFileDialog::getExistingDirectory(this, tr("Select directory to save found files"), currentDir);
+
+    if (dir.isEmpty()) {
+        ui->statusBar->showMessage("You need to select a directory to extract found files");
+        return;
+    }
+
+    QModelIndex index;
+    foreach (index, foundFiles) {
+        if (index.isValid()) {
+            QString name;
+            QByteArray extracted;
+
+            USTATUS result = ffsOps->extract(index, name, extracted, mode);
+
+            if (result) 
+            {
+                ffsFinder->msg("Could not extract file \"" + model->name(index) + "\"", index);
+                continue;
+            }
+
+            QFile outputFile(dir + QDir::toNativeSeparators(QDir::separator() + name) + ".ffs");
+
+            if (!outputFile.open(QFile::WriteOnly)) 
+            {
+                ffsFinder->msg("Could not open output file \"" + name + "\" for writing", index);
+                continue;
+            }
+
+            outputFile.resize(0);
+            outputFile.write(extracted);
+            outputFile.close();
+        }
+    }
+
+    showFinderMessages();
 }
 
 void UEFITool::showFinderMessages()
