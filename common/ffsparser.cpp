@@ -34,6 +34,7 @@ WITHWARRANTIES OR REPRESENTATIONS OF ANY KIND, EITHER EXPRESS OR IMPLIED.
 
 #include "nvramparser.h"
 #include "meparser.h"
+#include "bgmanifestparser.h"
 
 #ifndef QT_CORE_LIB
 namespace Qt {
@@ -77,12 +78,15 @@ imageBase(0), addressDiff(0x100000000ULL),
 bgAcmFound(false), bgKeyManifestFound(false), bgBootPolicyFound(false), bgProtectedRegionsBase(0) {
     nvramParser = new NvramParser(treeModel, this);
     meParser = new MeParser(treeModel, this);
+    manifestParser = NULL;
 }
 
 // Destructor
 FfsParser::~FfsParser() {
     delete nvramParser;
     delete meParser;
+    if (manifestParser)
+            delete manifestParser;
 }
 
 // Obtain parser messages
@@ -3410,22 +3414,13 @@ USTATUS FfsParser::checkProtectedRanges(const UModelIndex & index)
     // Calculate digest for BG-protected ranges
     UByteArray protectedParts;
     bool bgProtectedRangeFound = false;
-    try {
-        for (UINT32 i = 0; i < (UINT32)bgProtectedRanges.size(); i++) {
-            if (bgProtectedRanges[i].Type == BG_PROTECTED_RANGE_INTEL_BOOT_GUARD_IBB && bgProtectedRanges[i].Size > 0) {
-                bgProtectedRangeFound = true;
-                if ((UINT64)bgProtectedRanges[i].Offset >= addressDiff) {
-                    bgProtectedRanges[i].Offset -= (UINT32)addressDiff;
-                } else {
-                    // TODO: Explore this.
-                    msg(usprintf("%s: Suspicious BG protection offset", __FUNCTION__), index);
-                }
-                protectedParts += openedImage.mid(bgProtectedRanges[i].Offset, bgProtectedRanges[i].Size);
-                markProtectedRangeRecursive(index, bgProtectedRanges[i]);
-            }
+    for (UINT32 i = 0; i < (UINT32)bgProtectedRanges.size(); i++) {
+        if (bgProtectedRanges[i].Type == BG_PROTECTED_RANGE_INTEL_BOOT_GUARD_IBB) {
+            bgProtectedRangeFound = true;
+            bgProtectedRanges[i].Offset -= (UINT32)addressDiff;
+            protectedParts += openedImage.mid(bgProtectedRanges[i].Offset, bgProtectedRanges[i].Size);
+            markProtectedRangeRecursive(index, bgProtectedRanges[i]);
         }
-    } catch (...) {
-        bgProtectedRangeFound = false;
     }
 
     if (bgProtectedRangeFound) {
@@ -3503,24 +3498,19 @@ USTATUS FfsParser::checkProtectedRanges(const UModelIndex & index)
             && bgProtectedRanges[i].Size != 0 && bgProtectedRanges[i].Size != 0xFFFFFFFF
             && bgProtectedRanges[i].Offset != 0 && bgProtectedRanges[i].Offset != 0xFFFFFFFF) {
 
-            if ((UINT64)bgProtectedRanges[i].Offset >= addressDiff) {
-                bgProtectedRanges[i].Offset -= (UINT32)addressDiff;
-                protectedParts = openedImage.mid(bgProtectedRanges[i].Offset, bgProtectedRanges[i].Size);
+            bgProtectedRanges[i].Offset -= (UINT32)addressDiff;
+            protectedParts = openedImage.mid(bgProtectedRanges[i].Offset, bgProtectedRanges[i].Size);
 
-                UByteArray digest(SHA256_DIGEST_SIZE, '\x00');
-                sha256(protectedParts.constData(), protectedParts.size(), digest.data());
+            UByteArray digest(SHA256_DIGEST_SIZE, '\x00');
+            sha256(protectedParts.constData(), protectedParts.size(), digest.data());
 
-                if (digest != bgProtectedRanges[i].Hash) {
-                    msg(usprintf("%s: AMI protected range [%Xh:%Xh] hash mismatch, opened image may refuse to boot", __FUNCTION__,
-                        bgProtectedRanges[i].Offset, bgProtectedRanges[i].Offset + bgProtectedRanges[i].Size),
-                        model->findByBase(bgProtectedRanges[i].Offset));
-                }
-
-                markProtectedRangeRecursive(index, bgProtectedRanges[i]);
-            } else {
-                // TODO: Explore this.
-                msg(usprintf("%s: Suspicious AMI new BG protection offset", __FUNCTION__), index);
+            if (digest != bgProtectedRanges[i].Hash) {
+                msg(usprintf("%s: AMI protected range [%Xh:%Xh] hash mismatch, opened image may refuse to boot", __FUNCTION__,
+                    bgProtectedRanges[i].Offset, bgProtectedRanges[i].Offset + bgProtectedRanges[i].Size),
+                    model->findByBase(bgProtectedRanges[i].Offset));
             }
+
+            markProtectedRangeRecursive(index, bgProtectedRanges[i]);
         }
         else if (bgProtectedRanges[i].Type == BG_PROTECTED_RANGE_VENDOR_HASH_PHOENIX
             && bgProtectedRanges[i].Size != 0 && bgProtectedRanges[i].Size != 0xFFFFFFFF
@@ -3737,6 +3727,7 @@ USTATUS FfsParser::parseFit(const UModelIndex & index)
 #else
 USTATUS FfsParser::parseFit(const UModelIndex & index)
 {
+    const char* manifestHeader = NULL;
     // Check sanity
     if (!index.isValid())
         return EFI_INVALID_PARAMETER;
@@ -3832,13 +3823,54 @@ USTATUS FfsParser::parseFit(const UModelIndex & index)
                     break;
 
                 case FIT_TYPE_AC_KEY_MANIFEST:
-                    status = parseFitEntryBootGuardKeyManifest(item, localOffset, itemIndex, info, currentEntrySize);
+                    manifestHeader = (const char*)(item.constData() + localOffset);
+                    if (manifestParser)
+                    {
+                        delete manifestParser;
+                        manifestParser = NULL;
+                    }
+
+                    if ((UINT32)item.size() < localOffset + 0x8) {
+                        return U_INVALID_BG_KEY_MANIFEST;
+                    }
+                    //check type
+                    if (manifestHeader[0x8]>=0x20)
+                        manifestParser = new BGKeyManifestParserIcelake();
+                    else
+                        manifestParser = new BGKeyManifestParser();
+
+                    if (manifestParser)
+                        status = manifestParser->ParseManifest(item, localOffset, itemIndex, info, currentEntrySize, securityInfo, model, bgKmHash);
+
+                    if (status==U_SUCCESS)
+                        bgKeyManifestFound = true;
+
                     kmIndex = itemIndex;
                     break;
 
                 case FIT_TYPE_AC_BOOT_POLICY:
-                    status = parseFitEntryBootGuardBootPolicy(item, localOffset, itemIndex, info, currentEntrySize);
-                    bpIndex = itemIndex;
+                    manifestHeader = (const char*)(item.constData() + localOffset);
+                    if (manifestParser)
+                    {
+                        delete manifestParser;
+                        manifestParser = NULL;
+                    }
+
+                    if ((UINT32)item.size() < localOffset + 0x8) {
+                        return U_INVALID_BG_KEY_MANIFEST;
+                    }
+                    //check type
+                    if (manifestHeader[0x8]>=0x20)
+                        manifestParser = new BGIBBManifestParserIcelake(this);
+                    else
+                        manifestParser = new BGIBBManifestParser(this);
+
+                    if (manifestParser)
+                        status = manifestParser->ParseManifest(item, localOffset, itemIndex, info, currentEntrySize, securityInfo, model, bgKmHash);
+
+                    if (status==U_SUCCESS)
+                        bpIndex = itemIndex;
+
                     break;
 
                 default:
